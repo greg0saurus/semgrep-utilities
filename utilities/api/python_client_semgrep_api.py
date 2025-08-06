@@ -15,23 +15,40 @@ def retrieve_paginated_data(endpoint, kind, page_size, headers):
     """
     # Initialize values
     data_list = []
-    hasMore = True
-    page = -1
-    while (hasMore == True):
-        page = page + 1
+    page = 0  # Start from page 0
+    total_items = 0
+    
+    while True:
         page_string = ""
         if (kind == 'projects'):
             page_string = f"?page_size={page_size}&page={page}"
         else:
             page_string = f"&page_size={page_size}&page={page}"
+        
         r = requests.get(f"{endpoint}{page_string}", headers=headers)
         if r.status_code != 200:
             sys.exit(f'Get failed: {r.text}')
+        
         data = r.json()
-        if not data.get(kind):
-            print(f"At page {page} there is no more data of {kind}")
-            hasMore = False
-        data_list.extend(data.get(kind))
+        page_data = data.get(kind, [])
+        
+        if not page_data:
+            # Only print if we haven't collected any data yet
+            if total_items == 0:
+                print(f"No {kind} found")
+            break
+        
+        data_list.extend(page_data)
+        total_items += len(page_data)
+        page += 1
+        
+        # If we got fewer items than page_size, we're done
+        if len(page_data) < page_size:
+            break
+    
+    if total_items > 0:
+        print(f"Retrieved {total_items} {kind}")
+    
     return json.dumps({ f"{kind}": data_list})
 
 def get_deployment(headers):
@@ -46,7 +63,7 @@ def get_deployment(headers):
     data = r.json()
 
     deployment_slug = data['deployments'][0].get('slug')
-    print("Accessing org: " + deployment_slug)
+    print(f"Accessing org: {deployment_slug}")
     return deployment_slug
 
 
@@ -55,6 +72,7 @@ def get_projects(deployment_slug, headers):
     Gets the list of projects for use in other API calls.
     This call must paginate to work for users with larger numbers of projects.
     """
+    print("Fetching projects...")
     projects = retrieve_paginated_data(f"{BASE_URL}/{deployment_slug}/projects", "projects", 200, headers=headers)
     return projects
     
@@ -66,7 +84,7 @@ def get_all_findings(projects, headers):
         project_name = project['name']
         primary_branch = project['primary_branch']
         primary_branch = primary_branch.replace("refs/heads/", "") # To get master (main) instead of refs/heads/master (refs/heads/main)
-        print("Getting findings for: " + project_name)
+        print(f"\nProcessing project: {project_name}")
         get_findings_per_project(deployment_slug, project_name, primary_branch, headers)    
 
 def get_findings_per_project(deployment_slug, project, primary_branch, headers):
@@ -79,19 +97,34 @@ def get_findings_per_project(deployment_slug, project, primary_branch, headers):
     """
     desired_statuses = ["open", "fixing", "reviewing", "fixed", "ignored"]
     merged_findings = {"findings": []}
-    findings_url = f"{BASE_URL}/{deployment_slug}/findings?repos={project}&dedup=false"
+    base_findings_url = f"{BASE_URL}/{deployment_slug}/findings?repos={project}&dedup=false"
+    
+    total_findings_count = 0
+    
     for status in desired_statuses:
-        findings_url = f"{findings_url}&status={status}"
+        findings_url = f"{base_findings_url}&status={status}"
         if USE_PRIMARY_BRANCH_PARAM:
             findings_url = f"{findings_url}&ref={primary_branch}"
+        
+        print(f"  Fetching {status} findings...")
         project_findings = retrieve_paginated_data(findings_url, "findings", 3000, headers=headers)
         merged_results = json.loads(project_findings)
-        merged_findings["findings"].extend(merged_results.get("findings", []))
+        findings_count = len(merged_results.get("findings", []))
+        
+        if findings_count > 0:
+            print(f"    Found {findings_count} {status} findings")
+            merged_findings["findings"].extend(merged_results.get("findings", []))
+            total_findings_count += findings_count
+        else:
+            print(f"    No {status} findings")
 
     json_merged_findings = json.dumps(merged_findings)
     file_path = re.sub(r"[^\w\s]", "-", project) + ".json"
+    
     with open(file_path, "w") as file:
          file.write(json_merged_findings)
+    
+    print(f"  Total: {total_findings_count} findings written to {file_path}")
 
 
 if __name__ == "__main__":
@@ -100,10 +133,13 @@ if __name__ == "__main__":
     except KeyError: 
         print("Please set the environment variable SEMGREP_APP_TOKEN") 
         sys.exit(1)
+    
     default_headers = {"Accept": "application/json", "Authorization": "Bearer " + SEMGREP_APP_TOKEN}
     deployment_slug = get_deployment(default_headers)
     projects = get_projects(deployment_slug, default_headers) 
+    
     # Comment this line out if you don't want all projects
     get_all_findings(json.loads(projects), default_headers)
+    
     # Uncomment the following line and add a project name to generate a JSON file for a single project
-    # get_findings_per_project(deployment_slug, "juice-shop", default_headers) 
+    # get_findings_per_project(deployment_slug, "PROJECT_NAME", default_headers)
